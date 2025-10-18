@@ -1,0 +1,79 @@
+/* General Body and Layout */
+body {
+    font-family: 'Inter', sans-serif;
+    overflow: hidden; /* Prevent body scrollbars */
+}
+
+#map {
+    height: 100vh;
+    width: 100%;
+    background-color: #e5e7eb; /* Light gray background for map */
+}
+
+/* Sidebar Styling */
+.sidebar {
+    scrollbar-width: thin;
+    scrollbar-color: #a0aec0 #edf2f7;
+}
+.sidebar::-webkit-scrollbar {
+    width: 8px;
+}
+.sidebar::-webkit-scrollbar-track {
+    background: #edf2f7;
+}
+.sidebar::-webkit-scrollbar-thumb {
+    background-color: #a0aec0;
+    border-radius: 10px;
+    border: 3px solid #edf2f7;
+}
+
+/* Group Card Styling */
+.group-card.dimmed {
+    opacity: 0.5;
+    transition: opacity 0.3s ease-in-out;
+}
+
+/* Household Item Styling (Draggable Items) */
+.household-item {
+    cursor: grab;
+    transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.household-item:hover {
+    background-color: #f0f4f8; /* A light blue hover effect */
+}
+.household-item:active {
+    cursor: grabbing;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+/* Drop Zone Styling */
+.drop-zone {
+    min-height: 40px; /* Ensure drop zone is always targetable */
+    padding: 8px;
+    margin-top: 4px;
+    border: 2px dashed transparent;
+    border-radius: 8px;
+    transition: border-color 0.3s ease, background-color 0.3s ease;
+}
+
+.drop-zone-active {
+    border-color: #3b82f6; /* Blue dashed border when dragging over */
+    background-color: #eff6ff; /* Light blue background */
+}
+
+
+/* Map Marker Highlighting */
+.highlight-marker .leaflet-interactive {
+    stroke: #000000;
+    stroke-width: 3;
+    stroke-opacity: 1;
+    fill-opacity: 1;
+}
+
+/* Modal Transitions */
+.modal {
+    transition: opacity 0.3s ease;
+}
+.modal-content {
+    transition: transform 0.3s ease;
+}
