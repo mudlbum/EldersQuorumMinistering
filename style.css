@@ -1,5 +1,6 @@
 /* General Body and Layout */
 body {
+    /* Use Inter font, matching Tailwind's default */
     font-family: 'Inter', sans-serif;
     overflow: hidden; /* Prevent body scrollbars */
 }
@@ -60,7 +61,6 @@ body {
     border-color: #3b82f6; /* Blue dashed border when dragging over */
     background-color: #eff6ff; /* Light blue background */
 }
-
 
 /* Map Marker Highlighting */
 .highlight-marker .leaflet-interactive {
