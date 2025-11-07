@@ -125,8 +125,8 @@ async function geocodeWithNominatim(household, searchRegion) {
  */
 async function geocodeWithGemini(household, geminiApiKey, searchRegion) {
     // --- FIX: Use stable production model ---
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`;
-    
+// --- FIX: Use stable production model ---
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-latest:generateContent?key=${geminiApiKey}`;    
     // CRITICAL: Improved prompt for pinpoint accuracy
     const systemPrompt = `You are a precise geocoding expert. Your task is to provide EXACT latitude and longitude coordinates for street addresses.
 

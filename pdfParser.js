@@ -67,19 +67,19 @@ export async function parsePdfMembers(file) {
     
     return parseMemberLines(allLines);
 }
-
 /**
  * Parses the reconstructed lines into member objects.
- * FIXED: This version uses block-based parsing to correctly group multi-line addresses.
+ * FIXED: This version uses a more flexible regex and block-based parsing
+ * to correctly group multi-line addresses and handle different vital formats.
  */
 function parseMemberLines(lines) {
     const members = [];
     let currentBlock = []; // Stores lines for a single member
 
-    // Pattern to detect a NEW member line (Name, Gender, Age, Birth Date)
-    // This pattern looks for the *end* of the line (vitals)
-    const namePattern = /([MF])\s+(\d{1,3})\s+(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})/i;
-    
+    // FIXED: This pattern flexibly finds vitals (Age/Gender + Date) anywhere on the line.
+    // This is the key to identifying a new member line.
+    const vitalsPattern = /(?:(?:([MF])\s+(\d{1,3}))|(?:(\d{1,3})\s+([MF]))).*(?:\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4})/i;
+
     const phoneRegex = /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
     const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i;
     const footerPatterns = [
@@ -88,7 +88,9 @@ function parseMemberLines(lines) {
         /Name Gender Age/i,
         /Richmond Hill Ward/i,
         /Toronto Ontario Stake/i,
-        /Page \d+ of \d+/i
+        /Page \d+ of \d+/i,
+        /^\s*\d+\s*$/, // Page numbers
+        /by Intellectual Reserve, Inc/i
     ];
 
     const processBlock = () => {
@@ -105,32 +107,36 @@ function parseMemberLines(lines) {
             note: ''
         };
 
-        // First line *should* contain the name and vitals
+        // First line *must* contain the name and vitals
         const firstLine = currentBlock[0];
-        const match = firstLine.match(namePattern);
-        
+        const match = firstLine.match(vitalsPattern);
+
         if (match) {
-            // Name is everything before the match
-            member.name = firstLine.substring(0, match.index).trim();
-            member.gender = match[1];
-            member.age = match[2];
+            // Name is everything before the vitals match
+            member.name = firstLine.substring(0, match.index).trim().replace(/,$/, ''); // Clean name
+            // FIXED: Correctly assign gender/age from flexible regex groups
+            member.gender = match[1] || match[4];
+            member.age = match[2] || match[3];
             
-            // Check for phone/email/address on the *first line* after vitals
-            let remainingFirstLine = firstLine.substring(match.index + match[0].length).trim();
-            if (remainingFirstLine.length > 3) {
-                // Re-insert it as a new line to be processed
-                currentBlock.splice(1, 0, remainingFirstLine); 
-            }
+            // Add the *entire* first line to be processed for address/phone/email
+            // This is simpler than trying to find "remaining" parts.
+            currentBlock[0] = firstLine.substring(match.index); 
         } else {
-            // Could not parse this block, discard
+            // This block is invalid (e.g., a floating address line we caught)
+            // We can check if it's an address and pass it on, but for now, discard.
+            // This case should be rare with the new main loop logic.
             console.warn("Skipping unparsable block:", currentBlock);
             currentBlock = [];
             return;
         }
 
-        // Process all other lines (and the remainder of the first line, if any)
-        for (let i = 1; i < currentBlock.length; i++) {
-            const line = currentBlock[i].trim();
+        // Process all lines in the block for address, phone, or email
+        for (let i = 0; i < currentBlock.length; i++) {
+            let line = currentBlock[i].trim();
+            
+            // Clean up junk
+            line = line.replace(/,,"/g, '').replace(/"/g, '').replace(/^,/, '');
+            
             const phoneMatch = line.match(phoneRegex);
             const emailMatch = line.match(emailRegex);
 
@@ -142,17 +148,17 @@ function parseMemberLines(lines) {
             else if (emailMatch && emailMatch[0].length >= line.length - 5 && !member.email) {
                 member.email = emailMatch[0];
             } 
-            // Otherwise, assume it's an address line
-            else if (line.length > 3) { 
+            // Otherwise, assume it's an address line (if it's not junk)
+            else if (line.length > 3 && !vitalsPattern.test(line)) { 
                 member.addressLines.push(line);
             }
         }
 
         // Finalize member object
-        // Join address lines with a comma and space
         member.address = member.addressLines.join(', ')
             .replace(/"/g, '') // Remove quotes
             .replace(/\s+/g, ' ') // Normalize whitespace
+            .replace(/,$/, '') // Remove trailing commas
             .trim();
             
         if (!member.address) {
@@ -168,7 +174,7 @@ function parseMemberLines(lines) {
         currentBlock = []; // Reset for next member
     };
 
-    // --- Main Loop ---
+    // --- Main Loop (FIXED) ---
     for (const line of lines) {
         // Check for footers
         if (footerPatterns.some(pattern => pattern.test(line))) {
@@ -176,7 +182,7 @@ function parseMemberLines(lines) {
         }
 
         // Check if this line is the start of a new member
-        const match = line.match(namePattern);
+        const match = line.match(vitalsPattern);
 
         if (match) {
             // It's a new member. Process the *previous* block.
@@ -185,9 +191,14 @@ function parseMemberLines(lines) {
             currentBlock.push(line);
         } else if (currentBlock.length > 0) {
             // It's a continuation line. Add to the current block.
+            // This will now correctly add phone/email lines that are on
+            // separate lines from the main member entry.
+            // Floating address lines (like "286 Major Mackenzie") will
+            // be handled by the next "if (match)" block.
             currentBlock.push(line);
         }
-        // If currentBlock.length is 0 and it's not a new member line, we ignore it (it's junk)
+        // If currentBlock.length is 0 and it's not a new member line,
+        // we ignore it (it's junk, like a floating address at the start).
     }
     
     // Process the very last block
@@ -210,8 +221,8 @@ export async function parsePdfWithGemini(file, geminiApiKey) {
     const pdfText = await extractPdfText(file);
 
     // --- FIX: Use production-ready model ---
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`;
-    
+// --- FIX: Use production-ready model ---
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro-latest:generateContent?key=${geminiApiKey}`;    
     const systemPrompt = `You are an expert data extraction tool. Parse the provided text from a PDF member directory and convert it into a valid JSON array. Each object in the array should represent one person.
 
 IMPORTANT INSTRUCTIONS:

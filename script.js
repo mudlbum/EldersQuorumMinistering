@@ -262,41 +262,40 @@ function closeImportModal() {
     selectedPdfFile = null;
 }
 
-// --- handleImport now contains the full fallback logic ---
+// --- handleImport MODIFIED FOR GEMINI-ONLY PARSING ---
 async function handleImport() {
     if (!selectedPdfFile) {
         console.error("No PDF file selected.");
         return;
     }
-    console.log("Starting import process...");
+
+    // --- NEW: Check for API key *first* ---
+    if (!geminiApiKey) {
+        showStatus('Error: Gemini parsing requires an API key. Please add one in the sidebar.', 'error');
+        startImportBtn.disabled = false;
+        cancelImportBtn.disabled = false;
+        return; 
+    }
+
+    console.log("Starting import process with Gemini-only parsing...");
 
     startImportBtn.disabled = true;
     cancelImportBtn.disabled = true;
     importProgress.classList.remove('hidden');
 
     try {
-        showStatus('Processing PDF with local parser...', 'info');
-        updateProgress(10, 'Reading PDF...');
+        showStatus('Processing PDF with Gemini parser...', 'info');
+        updateProgress(10, 'Reading PDF for advanced parsing...');
 
-        console.log("Parsing PDF members with local parser...");
-        let households = await parsePdfMembers(selectedPdfFile); // From pdfParser.js
+        console.log("Parsing PDF members with Gemini...");
         
-        // --- FALLBACK LOGIC ---
-        if (households.length === 0) {
-            console.log("Local parser failed. Trying advanced parsing with Gemini...");
-            showStatus('Local parser failed. Trying advanced parsing...', 'info');
-            updateProgress(20, 'Trying advanced parsing...');
-
-            if (!geminiApiKey) {
-                throw new Error("Local parsing failed, and no Gemini API key is provided for advanced parsing. Please add one in the sidebar.");
-            }
-            
-            households = await parsePdfWithGemini(selectedPdfFile, geminiApiKey); // From pdfParser.js
-        }
+        // --- CHANGED: Call Gemini parser directly ---
+        // The local parsePdfMembers() call has been removed.
+        let households = await parsePdfWithGemini(selectedPdfFile, geminiApiKey); // From pdfParser.js
 
         // --- FINAL CHECK ---
         if (households.length === 0) {
-            throw new Error("All parsing methods failed. Unable to import members. Please check the PDF format.");
+            throw new Error("Gemini parsing failed. Unable to import members. Please check the PDF format or your API key.");
         }
         
         updateProgress(30, `Found ${households.length} households. Geocoding addresses...`);
@@ -306,19 +305,14 @@ async function handleImport() {
         updateProgress(80, 'Creating groups...');
 
         console.log("Organizing into groups...");
-        // --- CHANGE: Handle outliers from clustering ---
         const { newGroups, outlierHouseholds } = await organizeIntoGroups(geocodedHouseholds);
         updateProgress(90, 'Finalizing...');
         console.log(`Created ${newGroups.length} groups.`);
 
-        // --- New Import Logic: Preserve FA Pool ---
         const faPool = groupsData.find(g => g.isFAPool);
-        // --- CHANGE: Add outliers to FA Pool ---
-        faPool.members.push(...unassignedHouseholds, ...outlierHouseholds); // Add new unassigned and outliers to FA Pool
+        faPool.members.push(...unassignedHouseholds, ...outlierHouseholds);
         
-        // Clear old groups, but keep the FA pool
-        // --- CHANGE: Use newGroups variable ---
-        groupsData = [faPool, ...newGroups]; // Rebuild data, FA Pool first
+        groupsData = [faPool, ...newGroups];
         saveData();
 
         updateProgress(100, 'Import complete!');
@@ -335,7 +329,7 @@ async function handleImport() {
 
     } catch (error) {
         console.error('Import error:', error);
-        showStatus(`Error: ${error.message}`, 'error'); // This will show "failed to load"
+        showStatus(`Error: ${error.message}`, 'error');
         startImportBtn.disabled = false;
         cancelImportBtn.disabled = false;
         importProgress.classList.add('hidden'); // Hide progress bar on failure
