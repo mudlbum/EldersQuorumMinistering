@@ -10,7 +10,7 @@
 // --- FIX: Import new region functions ---
 import { loadApiKey, saveApiKey, geocodeAddress, loadSearchRegion, saveSearchRegion } from './services.js';
 // FIX: Import both parser functions
-import { parsePdfMembers, parsePdfWithGemini } from './pdfParser.js'; 
+import { parsePdfMembers, parsePdfWithGemini, deduplicateMembers } from './pdfParser.js';
 
 // --- DOM ELEMENT REFERENCES ---
 const loginOverlay = document.getElementById('login-overlay');

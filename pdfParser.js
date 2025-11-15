@@ -306,6 +306,7 @@ export async function parsePdfWithGemini(file, geminiApiKey) {
     return { households, rawMembers: allMembers };
 }
 
+
 /**
  * NEW: Single request Gemini parsing (for smaller PDFs)
  */
@@ -640,3 +641,4 @@ function groupMembersIntoHouseholds(members) {
     
     return finalHouseholdList;
 }
+
