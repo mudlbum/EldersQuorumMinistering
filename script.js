@@ -263,39 +263,81 @@ function closeImportModal() {
 }
 
 // --- handleImport MODIFIED FOR GEMINI-ONLY PARSING ---
+// --- IMPROVED handleImport with better progress tracking for large files ---
 async function handleImport() {
     if (!selectedPdfFile) {
         console.error("No PDF file selected.");
         return;
     }
 
-    // --- NEW: Check for API key *first* ---
-    if (!geminiApiKey) {
-        showStatus('Error: Gemini parsing requires an API key. Please add one in the sidebar.', 'error');
-        startImportBtn.disabled = false;
-        cancelImportBtn.disabled = false;
-        return; 
-    }
-
-    console.log("Starting import process with Gemini-only parsing...");
+    console.log("Starting import process...");
+    console.log(`PDF file size: ${(selectedPdfFile.size / 1024 / 1024).toFixed(2)} MB`);
 
     startImportBtn.disabled = true;
     cancelImportBtn.disabled = true;
     importProgress.classList.remove('hidden');
 
     try {
-        showStatus('Processing PDF with Gemini parser...', 'info');
-        updateProgress(10, 'Reading PDF for advanced parsing...');
-
-        console.log("Parsing PDF members with Gemini...");
+        let households = [];
         
-        // --- CHANGED: Call Gemini parser directly ---
-        // The local parsePdfMembers() call has been removed.
-        let households = await parsePdfWithGemini(selectedPdfFile, geminiApiKey); // From pdfParser.js
+        // Try local parser first
+        showStatus('Processing PDF with local parser...', 'info');
+        updateProgress(10, 'Reading PDF...');
+        
+        console.log("Attempting local PDF parsing...");
+        try {
+            households = await parsePdfMembers(selectedPdfFile);
+            console.log(`Local parser found ${households.length} households`);
+            updateProgress(20, `Local parser found ${households.length} households`);
+        } catch (localError) {
+            console.warn("Local parser encountered an error:", localError);
+            households = [];
+        }
+        
+        // If local parser fails or returns too few results, try Gemini
+        if (households.length < 5) {
+            if (geminiApiKey) {
+                console.log(`Local parser returned ${households.length} results, trying Gemini...`);
+                showStatus('Local parsing incomplete. Using advanced Gemini parsing...', 'info');
+                updateProgress(15, 'Using advanced AI parsing...');
+                
+                try {
+                    // Check file size to show appropriate message
+                    const fileSizeMB = selectedPdfFile.size / 1024 / 1024;
+                    if (fileSizeMB > 1) {
+                        updateProgress(20, 'Large file detected. This may take several minutes...');
+                    }
+                    
+                    households = await parsePdfWithGemini(selectedPdfFile, geminiApiKey);
+                    console.log(`Gemini parser found ${households.length} households`);
+                    updateProgress(25, `Gemini found ${households.length} households`);
+                } catch (geminiError) {
+                    console.error("Gemini parser also failed:", geminiError);
+                    showStatus(`Gemini error: ${geminiError.message}`, 'error');
+                    
+                    if (households.length === 0) {
+                        throw new Error(`Both parsers failed. Local: insufficient results. Gemini: ${geminiError.message}`);
+                    }
+                    // If we have some results from local parser, continue with those
+                    console.warn("Continuing with local parser results despite Gemini failure");
+                    showStatus(`Using ${households.length} households from local parser`, 'info');
+                }
+            } else {
+                console.warn(`Local parser only found ${households.length} households and no Gemini API key is available`);
+                if (households.length === 0) {
+                    throw new Error("Local parsing failed and no Gemini API key provided. Please add a Gemini API key for better parsing results.");
+                }
+                // Continue with whatever we got from local parser
+                showStatus(`Local parsing found ${households.length} households. Add Gemini API key for better results.`, 'info');
+            }
+        } else {
+            console.log(`Local parser successful with ${households.length} households`);
+            showStatus(`Successfully parsed ${households.length} households`, 'success');
+        }
 
-        // --- FINAL CHECK ---
+        // Final check
         if (households.length === 0) {
-            throw new Error("Gemini parsing failed. Unable to import members. Please check the PDF format or your API key.");
+            throw new Error("Unable to parse any data from PDF. Please check the PDF format.");
         }
         
         updateProgress(30, `Found ${households.length} households. Geocoding addresses...`);
@@ -316,7 +358,7 @@ async function handleImport() {
         saveData();
 
         updateProgress(100, 'Import complete!');
-        showStatus('Successfully imported and geocoded member data!', 'success');
+        showStatus(`Successfully imported ${households.length} households!`, 'success');
 
         setTimeout(() => {
             closeImportModal();
@@ -332,7 +374,7 @@ async function handleImport() {
         showStatus(`Error: ${error.message}`, 'error');
         startImportBtn.disabled = false;
         cancelImportBtn.disabled = false;
-        importProgress.classList.add('hidden'); // Hide progress bar on failure
+        importProgress.classList.add('hidden');
     }
 }
 
