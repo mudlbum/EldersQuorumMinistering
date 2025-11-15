@@ -262,8 +262,59 @@ function closeImportModal() {
     selectedPdfFile = null;
 }
 
+function groupMembersIntoHouseholds(members) {
+    const households = {};
+    const unassignedHouseholds = [];
+
+    for (const member of members) {
+        // Normalize address for grouping (remove apartment numbers, etc.)
+        const addressKey = member.address
+            .replace(/\bApt\s*\.?\s*\d+/gi, '')
+            .replace(/\bSuite\s*\.?\s*\d+/gi, '')
+            .replace(/\bUnit\s*\.?\s*\d+/gi, '')
+            .replace(/#\d+/g, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        if (addressKey && addressKey !== "no address in pdf" && addressKey.length > 10) {
+            if (!households[addressKey]) {
+                households[addressKey] = {
+                    id: crypto.randomUUID(),
+                    members: [],
+                    address: member.address, // Keep original full address
+                    coords: null,
+                    isCaregiverEligible: true,
+                    note: '',
+                };
+            }
+            households[addressKey].members.push(member);
+        } else {
+            // No valid address, create a "household" of one
+            unassignedHouseholds.push({
+                id: member.id,
+                members: [member],
+                address: "No Address in PDF",
+                coords: null,
+                isCaregiverEligible: true,
+                note: member.note
+            });
+        }
+    }
+    
+    // Create household note from all members
+    Object.values(households).forEach(h => {
+        h.note = h.members.map(m => `${m.name} (G: ${m.gender || '?'}, A: ${m.age || '?'})`).join(' | ');
+    });
+
+    const finalHouseholdList = Object.values(households).concat(unassignedHouseholds);
+    console.log(`Grouped into ${finalHouseholdList.length} households.`);
+    
+    return finalHouseholdList;
+}
 // --- handleImport MODIFIED FOR GEMINI-ONLY PARSING ---
 // --- IMPROVED handleImport with better progress tracking for large files ---
+// --- IMPROVED handleImport with chunk progress tracking ---
 async function handleImport() {
     if (!selectedPdfFile) {
         console.error("No PDF file selected.");
@@ -278,79 +329,107 @@ async function handleImport() {
     importProgress.classList.remove('hidden');
 
     try {
-        let households = [];
+        let localResult = null;
+        let geminiResult = null;
         
-        // Try local parser first
+        // STEP 1: Always try local parser first
         showStatus('Processing PDF with local parser...', 'info');
-        updateProgress(10, 'Reading PDF...');
+        updateProgress(5, 'Reading PDF...');
         
-        console.log("Attempting local PDF parsing...");
+        console.log("=== STEP 1: LOCAL PARSING ===");
         try {
-            households = await parsePdfMembers(selectedPdfFile);
-            console.log(`Local parser found ${households.length} households`);
-            updateProgress(20, `Local parser found ${households.length} households`);
+            // Create progress callback for local parser
+            window.localParserProgress = (pageStart, totalPages, membersSoFar, percent) => {
+                updateProgress(5 + (percent * 0.2), `Local parsing: page ${pageStart}/${totalPages} (${membersSoFar} members)...`);
+            };
+            
+            localResult = await parsePdfMembers(selectedPdfFile);
+            console.log(`Local parser: ${localResult.households.length} households, ${localResult.rawMembers.length} members`);
+            updateProgress(25, `Local parser found ${localResult.rawMembers.length} members`);
+            
+            delete window.localParserProgress;
+            
         } catch (localError) {
-            console.warn("Local parser encountered an error:", localError);
-            households = [];
+            console.warn("Local parser error:", localError);
+            delete window.localParserProgress;
+            localResult = { households: [], rawMembers: [] };
         }
         
-        // If local parser fails or returns too few results, try Gemini
-        if (households.length < 5) {
-            if (geminiApiKey) {
-                console.log(`Local parser returned ${households.length} results, trying Gemini...`);
-                showStatus('Local parsing incomplete. Using advanced Gemini parsing...', 'info');
-                updateProgress(15, 'Using advanced AI parsing...');
+        // STEP 2: Decide if we need Gemini
+        const needsGemini = localResult.rawMembers.length < 10; // Threshold for "too few"
+        
+        if (needsGemini && geminiApiKey) {
+            console.log(`=== STEP 2: GEMINI PARSING (local found only ${localResult.rawMembers.length}) ===`);
+            showStatus('Local parsing incomplete. Using Gemini to fill gaps...', 'info');
+            updateProgress(30, 'Starting AI parsing...');
+            
+            try {
+                // Check file size
+                const fileSizeMB = selectedPdfFile.size / 1024 / 1024;
+                if (fileSizeMB > 0.5) {
+                    updateProgress(35, 'Large file detected. Processing in chunks...');
+                }
                 
-                try {
-                    // Check file size to show appropriate message
-                    const fileSizeMB = selectedPdfFile.size / 1024 / 1024;
-                    if (fileSizeMB > 1) {
-                        updateProgress(20, 'Large file detected. This may take several minutes...');
-                    }
-                    
-                    households = await parsePdfWithGemini(selectedPdfFile, geminiApiKey);
-                    console.log(`Gemini parser found ${households.length} households`);
-                    updateProgress(25, `Gemini found ${households.length} households`);
-                } catch (geminiError) {
-                    console.error("Gemini parser also failed:", geminiError);
-                    showStatus(`Gemini error: ${geminiError.message}`, 'error');
-                    
-                    if (households.length === 0) {
-                        throw new Error(`Both parsers failed. Local: insufficient results. Gemini: ${geminiError.message}`);
-                    }
-                    // If we have some results from local parser, continue with those
-                    console.warn("Continuing with local parser results despite Gemini failure");
-                    showStatus(`Using ${households.length} households from local parser`, 'info');
-                }
-            } else {
-                console.warn(`Local parser only found ${households.length} households and no Gemini API key is available`);
-                if (households.length === 0) {
-                    throw new Error("Local parsing failed and no Gemini API key provided. Please add a Gemini API key for better parsing results.");
-                }
-                // Continue with whatever we got from local parser
-                showStatus(`Local parsing found ${households.length} households. Add Gemini API key for better results.`, 'info');
+                // Create progress callback for Gemini
+                window.geminiChunkProgress = (current, total, membersSoFar) => {
+                    const chunkPercent = Math.floor((current / total) * 35) + 35; // 35-70%
+                    updateProgress(chunkPercent, `Gemini chunk ${current}/${total} (${membersSoFar} members)...`);
+                };
+                
+                geminiResult = await parsePdfWithGemini(selectedPdfFile, geminiApiKey);
+                console.log(`Gemini parser: ${geminiResult.households.length} households, ${geminiResult.rawMembers.length} members`);
+                updateProgress(70, `Gemini found ${geminiResult.rawMembers.length} members`);
+                
+                delete window.geminiChunkProgress;
+                
+            } catch (geminiError) {
+                console.error("Gemini parser error:", geminiError);
+                showStatus(`Gemini failed: ${geminiError.message}`, 'error');
+                delete window.geminiChunkProgress;
+                geminiResult = { households: [], rawMembers: [] };
             }
+        } else if (needsGemini && !geminiApiKey) {
+            console.warn("Gemini parsing needed but no API key provided");
+            showStatus('Local parser found few results. Add Gemini API key for better parsing.', 'info');
         } else {
-            console.log(`Local parser successful with ${households.length} households`);
-            showStatus(`Successfully parsed ${households.length} households`, 'success');
-        }
-
-        // Final check
-        if (households.length === 0) {
-            throw new Error("Unable to parse any data from PDF. Please check the PDF format.");
+            console.log("=== STEP 2: SKIPPED (local parser sufficient) ===");
         }
         
-        updateProgress(30, `Found ${households.length} households. Geocoding addresses...`);
-        console.log(`Found ${households.length} "household" objects.`);
-
+        // STEP 3: Deduplicate and merge
+        console.log("=== STEP 3: DEDUPLICATION ===");
+        updateProgress(72, 'Merging and deduplicating results...');
+        
+        const localMembers = localResult ? localResult.rawMembers : [];
+        const geminiMembers = geminiResult ? geminiResult.rawMembers : [];
+        
+        const finalMembers = deduplicateMembers(localMembers, geminiMembers);
+        
+        if (finalMembers.length === 0) {
+            throw new Error("No members found by any parser. Please check the PDF format.");
+        }
+        
+        console.log(`Final member count: ${finalMembers.length}`);
+        showStatus(`Successfully parsed ${finalMembers.length} unique members!`, 'success');
+        
+        // STEP 4: Group into households
+        console.log("=== STEP 4: GROUPING ===");
+        updateProgress(75, 'Grouping members into households...');
+        const households = groupMembersIntoHouseholds(finalMembers);
+        console.log(`Grouped into ${households.length} households`);
+        
+        // STEP 5: Geocoding
+        console.log("=== STEP 5: GEOCODING ===");
+        updateProgress(77, `Geocoding ${households.length} addresses...`);
         const {geocodedHouseholds, unassignedHouseholds} = await geocodeHouseholds(households);
-        updateProgress(80, 'Creating groups...');
-
-        console.log("Organizing into groups...");
+        
+        // STEP 6: Clustering
+        console.log("=== STEP 6: CLUSTERING ===");
+        updateProgress(90, 'Creating groups...');
         const { newGroups, outlierHouseholds } = await organizeIntoGroups(geocodedHouseholds);
-        updateProgress(90, 'Finalizing...');
-        console.log(`Created ${newGroups.length} groups.`);
-
+        console.log(`Created ${newGroups.length} groups`);
+        
+        // STEP 7: Save
+        updateProgress(95, 'Finalizing...');
         const faPool = groupsData.find(g => g.isFAPool);
         faPool.members.push(...unassignedHouseholds, ...outlierHouseholds);
         
@@ -358,15 +437,15 @@ async function handleImport() {
         saveData();
 
         updateProgress(100, 'Import complete!');
-        showStatus(`Successfully imported ${households.length} households!`, 'success');
+        showStatus(`✓ Imported ${finalMembers.length} members into ${newGroups.length} groups!`, 'success');
 
         setTimeout(() => {
             closeImportModal();
             startImportBtn.disabled = false;
             cancelImportBtn.disabled = false;
-        }, 1500);
+        }, 2000);
 
-        console.log("Import complete, rendering app...");
+        console.log("=== IMPORT COMPLETE ===");
         renderApp();
 
     } catch (error) {
@@ -374,7 +453,6 @@ async function handleImport() {
         showStatus(`Error: ${error.message}`, 'error');
         startImportBtn.disabled = false;
         cancelImportBtn.disabled = false;
-        importProgress.classList.add('hidden');
     }
 }
 
