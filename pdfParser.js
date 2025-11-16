@@ -67,12 +67,11 @@ export async function parsePdfMembers(file) {
 
             // For each line, sort items by X-coordinate (left to right) and join
             for (const [, items] of sortedLines) {
+                // --- FIX: Join with a unique separator to preserve columns ---
                 const line = items
                     .sort((a, b) => a.transform[4] - b.transform[4])
-                    .map(item => item.str)
-                    .join(' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
+                    .map(item => item.str.replace(/\s+/g, ' ').trim()) // Clean each item
+                    .join('|||'); // Use separator
                 
                 if (line.length > 2) {
                     batchLines.push(line);
@@ -104,11 +103,7 @@ function parseMemberLinesRaw(lines) {
     const members = [];
     
     // Patterns
-    // --- FIX: More flexible name pattern ---
-    // Handles optional quotes, spaces in last names, and common apostrophes
     const namePattern = /^"?([A-Za-z-'’\s]+,\s+[A-Za-z-'’\s]+?)"?(?:\s+[MF]\s+\d{1,3}|\s*$)?/;
-    
-    // --- FIX: Additional pattern for "32 F" format ---
     const genderAgePattern = /([MF])\s+(\d{1,3})/;
     const genderAgePattern2 = /(\d{1,3})\s+([MF])/; // e.g., "32 F"
 
@@ -133,16 +128,19 @@ function parseMemberLinesRaw(lines) {
     let processedCount = 0;
     
     while (i < lines.length) {
-        const line = lines[i].trim();
+        // --- FIX: Split line into columns ---
+        const line = lines[i];
+        const columns = line.split('|||');
+        const firstCol = columns[0] ? columns[0].trim() : '';
         
         // Skip footers and empty lines
-        if (!line || footerPatterns.some(pattern => pattern.test(line))) {
+        if (!firstCol || footerPatterns.some(pattern => pattern.test(firstCol))) {
             i++;
             continue;
         }
 
-        // Try to find a name at the start of this line
-        const nameMatch = line.match(namePattern);
+        // Try to find a name at the start of the first column
+        const nameMatch = firstCol.match(namePattern);
         
         if (nameMatch) {
             let member = {
@@ -156,88 +154,103 @@ function parseMemberLinesRaw(lines) {
                 note: ''
             };
 
-            // Extract gender/age from the same line if present
-            let gaMatch = line.match(genderAgePattern);
-            if (gaMatch) {
-                member.gender = gaMatch[1];
-                member.age = gaMatch[2];
-            } else {
-                gaMatch = line.match(genderAgePattern2);
+            // --- FIX: Process all columns on the *current* line ---
+            for (const colText of columns) {
+                const text = colText.trim();
+                if (!text) continue;
+
+                let gaMatch = text.match(genderAgePattern);
                 if (gaMatch) {
-                    member.gender = gaMatch[2];
-                    member.age = gaMatch[1];
+                    member.gender = gaMatch[1];
+                    member.age = gaMatch[2];
+                } else {
+                    gaMatch = text.match(genderAgePattern2);
+                    if (gaMatch) {
+                        member.gender = gaMatch[2];
+                        member.age = gaMatch[1];
+                    }
+                }
+                
+                const phoneMatch = text.match(phoneRegex);
+                if (phoneMatch && !member.phone) {
+                    member.phone = phoneMatch[0];
+                }
+
+                const emailMatch = text.match(emailRegex);
+                if (emailMatch && !member.email) {
+                    member.email = emailMatch[0];
                 }
             }
+            // --- END FIX ---
+
 
             // Look ahead for related information
             let lookAheadCount = 0;
             let j = i + 1;
+            let postalCodeFound = false;
             
-            // This allows the parser to read more lines for a single member
-            // before giving up, which is needed for complex, multi-line entries.
             while (j < lines.length && lookAheadCount < 20) {
-                const nextLine = lines[j].trim();
-                
-                // Skip empty lines
-                if (!nextLine) {
-                    j++;
-                    lookAheadCount++;
-                    continue;
+                const nextLine = lines[j];
+                const nextColumns = nextLine.split('|||');
+                const firstNextCol = nextColumns[0] ? nextColumns[0].trim() : '';
+
+                if (postalCodeFound) {
+                    break;
                 }
                 
                 // Stop if we hit another member name or footer
-                if (namePattern.test(nextLine) || footerPatterns.some(p => p.test(nextLine))) {
+                if (namePattern.test(firstNextCol) || footerPatterns.some(p => p.test(firstNextCol))) {
                     break;
                 }
 
-                // --- FIX: Check all patterns ---
-                const phoneMatch = nextLine.match(phoneRegex);
-                const emailMatch = nextLine.match(emailRegex);
-                const dateMatch = datePattern.test(nextLine);
-                
-                // Check both gender/age patterns
-                gaMatch = nextLine.match(genderAgePattern);
-                if (!gaMatch) {
-                    gaMatch = nextLine.match(genderAgePattern2);
-                }
+                // --- FIX: Process all columns on the *next* line ---
+                for (const colText of nextColumns) {
+                    const text = colText.trim();
+                    if (!text) continue;
 
-                // --- FIX: Better address detection ---
-                const looksLikeAddress = postalCodePattern.test(nextLine) || 
-                                        /\d+\s+[A-Z]/.test(nextLine) || // Street number + name
-                                        /\b(Apt|Suite|Unit)\b/i.test(nextLine) || // Apt
-                                        /\b(Ave|St|Blvd|Dr|Rd|Cir|Court|Crescent|Way)\b/i.test(nextLine) ||
-                                        /\b(ON|Ontario|THORNHILL|RICHMOND HILL|MAPLE|MARKHAM|VAUGHAN|CONCORD|KING CITY|STOUFFVILLE|UNIONVILLE|WOODBRIDGE|TORONTO)\b/i.test(nextLine); // City names
-
-                // --- ASSIGNMENT LOGIC ---
-
-                if (gaMatch && (!member.gender || !member.age)) {
-                    // It's gender/age
-                    member.gender = gaMatch[1].length === 1 ? gaMatch[1] : gaMatch[2];
-                    member.age = gaMatch[1].length === 1 ? gaMatch[2] : gaMatch[1];
-                } else if (phoneMatch && !member.phone) {
-                    // It's a phone number
-                    member.phone = phoneMatch[0];
-                } else if (emailMatch && !member.email) {
-                    // It's an email
-                    member.email = emailMatch[0];
-                } else if (looksLikeAddress) {
-                    // It's definitely part of an address
-                    member.addressLines.push(nextLine);
-                
-                // --- FIX: Handle "just text" lines ---
-                } else if (!dateMatch && !gaMatch && !phoneMatch && !emailMatch) {
-                    // It's not phone, email, gender/age, or a date.
-                    // It's just text.
-                    
-                    if (member.addressLines.length === 0) {
-                        // We haven't found an address yet, this is likely part of the name (e.g., "Santiago")
-                        member.name += ` ${nextLine}`;
-                    } else {
-                        // We *have* found an address, this is likely a continuation
-                        member.addressLines.push(nextLine);
+                    // Stop if we hit a stray/malformed line
+                    const strayLinePattern = /^[",]{2,}/; 
+                    if (strayLinePattern.test(text)) {
+                        continue; // Skip this bad column, but check others
                     }
-                }
-                // If it's a dateMatch, we just ignore it.
+
+                    const phoneMatch = text.match(phoneRegex);
+                    const emailMatch = text.match(emailRegex);
+                    const dateMatch = datePattern.test(text);
+                    
+                    let gaMatch = text.match(genderAgePattern);
+                    if (!gaMatch) {
+                        gaMatch = text.match(genderAgePattern2);
+                    }
+
+                    const looksLikeAddress = postalCodePattern.test(text) || 
+                                            /\d+\s+[A-Z]/.test(text) || 
+                                            /\b(Apt|Suite|Unit)\b/i.test(text) || 
+                                            /\b(Ave|St|Blvd|Dr|Rd|Cir|Court|Crescent|Way)\b/i.test(text) ||
+                                            /\b(ON|Ontario|THORNHILL|RICHMOND HILL|MAPLE|MARKHAM|VAUGHAN|CONCORD|KING CITY|STOUFFVILLE|UNIONVILLE|WOODBRIDGE|TORONTO)\b/i.test(text);
+
+                    // --- ASSIGNMENT LOGIC ---
+                    if (gaMatch && (!member.gender || !member.age)) {
+                        member.gender = gaMatch[1].length === 1 ? gaMatch[1] : gaMatch[2];
+                        member.age = gaMatch[1].length === 1 ? gaMatch[2] : gaMatch[1];
+                    } else if (phoneMatch && !member.phone) {
+                        member.phone = phoneMatch[0];
+                    } else if (emailMatch && !member.email) {
+                        member.email = emailMatch[0];
+                    } else if (looksLikeAddress) {
+                        member.addressLines.push(text);
+                        if (postalCodePattern.test(text)) {
+                            postalCodeFound = true;
+                        }
+                    } else if (!dateMatch && !gaMatch && !phoneMatch && !emailMatch) {
+                        // It's just text.
+                        if (member.addressLines.length === 0) {
+                            member.name += ` ${text}`;
+                        } else {
+                            member.addressLines.push(text);
+                        }
+                    }
+                } // --- End column loop ---
 
                 j++;
                 lookAheadCount++;
@@ -263,7 +276,6 @@ function parseMemberLinesRaw(lines) {
                 members.push(member);
                 processedCount++;
                 
-                // Log progress for large files
                 if (processedCount % 50 === 0) {
                     console.log(`Parsed ${processedCount} members so far...`);
                 }
@@ -281,7 +293,6 @@ function parseMemberLinesRaw(lines) {
 
 /**
  * Fallback PDF parsing function using Gemini API.
- * Returns both households and raw members for deduplication.
  */
 export async function parsePdfWithGemini(file, geminiApiKey) {
     if (!geminiApiKey) {
@@ -293,14 +304,14 @@ export async function parsePdfWithGemini(file, geminiApiKey) {
     
     // Check if PDF is large - use chunked processing
     const estimatedTokens = pdfText.length / 4;
-    const MAX_TOKENS = 20000;
+    const MAX_TOKENS = 80000; // Large context for 2.5 flash
     
     console.log(`PDF text length: ${pdfText.length} chars, estimated ${estimatedTokens.toFixed(0)} tokens`);
     
     let allMembers = [];
     
     if (estimatedTokens > MAX_TOKENS) {
-        console.log(`Large PDF detected. Using chunked parsing (20 members per chunk)...`);
+        console.log(`Large PDF detected. Using chunked parsing (25 members per chunk)...`);
         allMembers = await parsePdfWithGeminiChunked(pdfText, geminiApiKey);
     } else {
         console.log("PDF is small enough for single request");
@@ -325,34 +336,59 @@ export async function parsePdfWithGemini(file, geminiApiKey) {
  * NEW: Single request Gemini parsing (for smaller PDFs)
  */
 async function parsePdfWithGeminiSingle(pdfText, geminiApiKey) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiApiKey}`;
+    // --- FIX: Use gemini-2.5-flash-preview-09-2025 model ---
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`;
     
-    const prompt = `Extract all members from this church directory PDF text. Return a JSON array.
+    // --- FIX: Improved prompt for Gemini 2.5 Flash ---
+    const systemPrompt = `You are an expert data extraction tool. Your task is to parse unstructured text from a PDF directory and return a clean JSON array of member objects.
 
-Each member needs:
-- name: "Last, First" format
-- gender: M or F  
-- age: number as string
-- address: FULL complete address (combine multi-line addresses)
-- phone: phone number if present
-- email: email if present
+RULES:
+1.  Parse EVERY member. Do not skip any.
+2.  Format names as "Last, First". Handle multi-part last names (e.g., "Acevedo Manrique, Luis").
+3.  Combine multi-line addresses into a single string. (e.g., "58 Morgan Ave" + "THORNHILL ON L3T 1R2" becomes "58 Morgan Ave, THORNHILL ON L3T 1R2").
+4.  Extract gender (M/F) and age (as string).
+5.  Extract the FIRST phone number found.
+6.  Extract the FIRST email found.
+7.  If a field is missing, use an empty string "".
+8.  Return ONLY the JSON array. Do not include \`\`\`json or any other text.`;
 
-Important: Combine address lines like "123 Main St" + "CITY ON" + "A1B 2C3" into "123 Main St, CITY ON A1B 2C3"
+    const userQuery = `Parse the following PDF text into a JSON array of member objects.
 
-Text:
+Each object must have these keys: "name", "gender", "age", "address", "phone", "email".
+
+PDF Text:
 ${pdfText}
 
-Return ONLY a JSON array, nothing else.`;
+Return ONLY the JSON array.`;
+
 
     const payload = {
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: {
+            parts: [{ text: systemPrompt }]
+        },
         generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 8000
+            // --- FIX: Request JSON output ---
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: "ARRAY",
+                items: {
+                    type: "OBJECT",
+                    properties: {
+                        "name": { "type": "STRING" },
+                        "gender": { "type": "STRING" },
+                        "age": { "type": "STRING" },
+                        "address": { "type": "STRING" },
+                        "phone": { "type": "STRING" },
+                        "email": { "type": "STRING" }
+                    }
+                }
+            },
+            temperature: 0.0,
         }
     };
 
-    console.log("Calling Gemini API...");
+    console.log("Calling Gemini 2.5 Flash API...");
     
     try {
         const data = await fetchWithRetry(url, {
@@ -362,12 +398,14 @@ Return ONLY a JSON array, nothing else.`;
         });
 
         const candidate = data.candidates?.[0];
+        // --- FIX: Text is in the 'text' part when JSON is requested ---
         const text = candidate?.content?.parts?.[0]?.text;
 
         if (!text) {
             throw new Error("Gemini returned empty response");
         }
 
+        // The model should return a JSON string directly
         return extractMembersFromJSON(text);
         
     } catch (error) {
@@ -469,32 +507,53 @@ async function parsePdfWithGeminiChunked(pdfText, geminiApiKey) {
  * Simplified for better reliability
  */
 async function processGeminiChunk(chunkText, geminiApiKey, chunkNum, totalChunks) {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${geminiApiKey}`;
+    // --- FIX: Use gemini-2.5-flash-preview-09-2025 model ---
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiApiKey}`;
     
-    const prompt = `Extract members from this church directory text. Return a JSON array.
+    // --- FIX: Use System Prompt and JSON schema ---
+    const systemPrompt = `You are an expert data extraction tool. Your task is to parse unstructured text from a PDF directory and return a clean JSON array of member objects.
 
-Each member object needs:
-- name: "Last, First" format
-- gender: M or F
-- age: number as string
-- address: complete address (combine multiple lines)
-- phone: phone number if present
-- email: email if present
+RULES:
+1.  Parse EVERY member. Do not skip any.
+2.  Format names as "Last, First". Handle multi-part last names.
+3.  Combine multi-line addresses into a single string.
+4.  Extract gender (M/F) and age (as string).
+5.  Extract the FIRST phone number found.
+6.  Extract the FIRST email found.
+7.  If a field is missing, use an empty string "".
+8.  Return ONLY the JSON array.`;
+    
+    const userQuery = `Parse the following PDF text into a JSON array of member objects.
 
-Combine address lines like "123 Main St" + "CITY ON" + "A1B 2C3" into "123 Main St, CITY ON A1B 2C3"
+Each object must have these keys: "name", "gender", "age", "address", "phone", "email".
 
 Text to parse:
 ${chunkText}
 
-Return ONLY the JSON array, nothing else.`;
+Return ONLY the JSON array.`;
 
     const payload = {
-        contents: [{ 
-            parts: [{ text: prompt }] 
-        }],
+        contents: [{ parts: [{ text: userQuery }] }],
+        systemInstruction: {
+            parts: [{ text: systemPrompt }]
+        },
         generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 8000
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: "ARRAY",
+                items: {
+                    type: "OBJECT",
+                    properties: {
+                        "name": { "type": "STRING" },
+                        "gender": { "type": "STRING" },
+                        "age": { "type": "STRING" },
+                        "address": { "type": "STRING" },
+                        "phone": { "type": "STRING" },
+                        "email": { "type": "STRING" }
+                    }
+                }
+            },
+            temperature: 0.0,
         }
     };
     
@@ -530,11 +589,23 @@ function extractMembersFromJSON(text) {
     const arrayEnd = cleanText.lastIndexOf(']');
     
     if (arrayStart === -1 || arrayEnd === -1) {
-        console.error("No JSON array found in response");
-        console.log("Response preview:", cleanText.substring(0, 200));
-        return [];
+        // If it's not an array, it might be a single JSON object (though schema asks for array)
+        // Let's just try parsing the whole thing
+        try {
+            const members = JSON.parse(cleanText);
+            if (Array.isArray(members)) {
+                return members;
+            } else if (typeof members === 'object' && members !== null) {
+                return [members]; // Wrap single object in an array
+            }
+        } catch (e) {
+             console.error("No JSON array found in response and full text is not valid JSON.");
+             console.log("Response preview:", cleanText.substring(0, 200));
+             return [];
+        }
     }
     
+    // If we found array brackets, extract that part
     cleanText = cleanText.substring(arrayStart, arrayEnd + 1);
     
     try {
@@ -611,7 +682,7 @@ function groupMembersIntoHouseholds(members) {
 
     for (const member of members) {
         // Normalize address for grouping (remove apartment numbers, etc.)
-    const addressKey = member.address
+        const addressKey = member.address
             .replace(/\bApt\s*\.?\s*\d+/gi, '')
             .replace(/\bSuite\s*\.?\s*\d+/gi, '')
             .replace(/\bUnit\s*\.?\s*\d+/gi, '')
