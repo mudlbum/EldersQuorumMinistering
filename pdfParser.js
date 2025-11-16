@@ -104,8 +104,14 @@ function parseMemberLinesRaw(lines) {
     const members = [];
     
     // Patterns
-    const namePattern = /^([A-Z][a-z]+(?:-[A-Z][a-z]+)*,\s+[A-Za-z\s]+?)(?:\s+[MF]\s+\d{1,3}|\s*$)/;
+    // --- FIX: More flexible name pattern ---
+    // Handles optional quotes, spaces in last names, and common apostrophes
+    const namePattern = /^"?([A-Za-z-'’\s]+,\s+[A-Za-z-'’\s]+?)"?(?:\s+[MF]\s+\d{1,3}|\s*$)?/;
+    
+    // --- FIX: Additional pattern for "32 F" format ---
     const genderAgePattern = /([MF])\s+(\d{1,3})/;
+    const genderAgePattern2 = /(\d{1,3})\s+([MF])/; // e.g., "32 F"
+
     const datePattern = /\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}/i;
     const phoneRegex = /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/;
     const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i;
@@ -151,18 +157,25 @@ function parseMemberLinesRaw(lines) {
             };
 
             // Extract gender/age from the same line if present
-            const genderAgeMatch = line.match(genderAgePattern);
-            if (genderAgeMatch) {
-                member.gender = genderAgeMatch[1];
-                member.age = genderAgeMatch[2];
+            let gaMatch = line.match(genderAgePattern);
+            if (gaMatch) {
+                member.gender = gaMatch[1];
+                member.age = gaMatch[2];
+            } else {
+                gaMatch = line.match(genderAgePattern2);
+                if (gaMatch) {
+                    member.gender = gaMatch[2];
+                    member.age = gaMatch[1];
+                }
             }
 
-            // Look ahead for related information (up to 10 lines for safety with large files)
+            // Look ahead for related information
             let lookAheadCount = 0;
             let j = i + 1;
-            let consecutiveNonAddressLines = 0;
             
-            while (j < lines.length && lookAheadCount < 10) {
+            // This allows the parser to read more lines for a single member
+            // before giving up, which is needed for complex, multi-line entries.
+            while (j < lines.length && lookAheadCount < 20) {
                 const nextLine = lines[j].trim();
                 
                 // Skip empty lines
@@ -177,54 +190,54 @@ function parseMemberLinesRaw(lines) {
                     break;
                 }
 
-                // Extract gender/age if not yet found
-                if (!member.gender || !member.age) {
-                    const gaMatch = nextLine.match(genderAgePattern);
-                    if (gaMatch) {
-                        member.gender = gaMatch[1];
-                        member.age = gaMatch[2];
-                    }
-                }
-
-                // Extract phone
+                // --- FIX: Check all patterns ---
                 const phoneMatch = nextLine.match(phoneRegex);
-                if (phoneMatch && !member.phone) {
-                    member.phone = phoneMatch[0];
-                }
-
-                // Extract email
                 const emailMatch = nextLine.match(emailRegex);
-                if (emailMatch && !member.email) {
-                    member.email = emailMatch[0];
+                const dateMatch = datePattern.test(nextLine);
+                
+                // Check both gender/age patterns
+                gaMatch = nextLine.match(genderAgePattern);
+                if (!gaMatch) {
+                    gaMatch = nextLine.match(genderAgePattern2);
                 }
 
-                // Collect address lines
-                const isJustPhone = phoneMatch && phoneMatch[0].length >= nextLine.length - 5;
-                const isJustEmail = emailMatch && emailMatch[0].length >= nextLine.length - 5;
-                const hasDatePattern = datePattern.test(nextLine);
-                const hasGenderAge = genderAgePattern.test(nextLine);
-                
-                // Check if this looks like an address line
-                const looksLikeAddress = !isJustPhone && !isJustEmail && !hasDatePattern && 
-                                        !hasGenderAge && nextLine.length > 3 &&
-                                        (postalCodePattern.test(nextLine) || 
-                                         /\d+\s+[A-Z]/.test(nextLine) || // Street number + name
-                                         /\b(Ave|St|Blvd|Dr|Rd|Cir|Court|Crescent|Way)\b/i.test(nextLine) ||
-                                         /\b(ON|Ontario)\b/i.test(nextLine));
-                
-                if (looksLikeAddress) {
+                // --- FIX: Better address detection ---
+                const looksLikeAddress = postalCodePattern.test(nextLine) || 
+                                        /\d+\s+[A-Z]/.test(nextLine) || // Street number + name
+                                        /\b(Apt|Suite|Unit)\b/i.test(nextLine) || // Apt
+                                        /\b(Ave|St|Blvd|Dr|Rd|Cir|Court|Crescent|Way)\b/i.test(nextLine) ||
+                                        /\b(ON|Ontario|THORNHILL|RICHMOND HILL|MAPLE|MARKHAM|VAUGHAN|CONCORD|KING CITY|STOUFFVILLE|UNIONVILLE|WOODBRIDGE|TORONTO)\b/i.test(nextLine); // City names
+
+                // --- ASSIGNMENT LOGIC ---
+
+                if (gaMatch && (!member.gender || !member.age)) {
+                    // It's gender/age
+                    member.gender = gaMatch[1].length === 1 ? gaMatch[1] : gaMatch[2];
+                    member.age = gaMatch[1].length === 1 ? gaMatch[2] : gaMatch[1];
+                } else if (phoneMatch && !member.phone) {
+                    // It's a phone number
+                    member.phone = phoneMatch[0];
+                } else if (emailMatch && !member.email) {
+                    // It's an email
+                    member.email = emailMatch[0];
+                } else if (looksLikeAddress) {
+                    // It's definitely part of an address
                     member.addressLines.push(nextLine);
-                    consecutiveNonAddressLines = 0;
-                } else if (!isJustPhone && !isJustEmail && !hasDatePattern && !hasGenderAge && nextLine.length > 3) {
-                    // Might still be address, but count it
-                    member.addressLines.push(nextLine);
-                    consecutiveNonAddressLines++;
+                
+                // --- FIX: Handle "just text" lines ---
+                } else if (!dateMatch && !gaMatch && !phoneMatch && !emailMatch) {
+                    // It's not phone, email, gender/age, or a date.
+                    // It's just text.
                     
-                    // If we have too many non-address-looking lines, we might be into the next member
-                    if (consecutiveNonAddressLines > 2 && member.addressLines.length > 2) {
-                        break;
+                    if (member.addressLines.length === 0) {
+                        // We haven't found an address yet, this is likely part of the name (e.g., "Santiago")
+                        member.name += ` ${nextLine}`;
+                    } else {
+                        // We *have* found an address, this is likely a continuation
+                        member.addressLines.push(nextLine);
                     }
                 }
+                // If it's a dateMatch, we just ignore it.
 
                 j++;
                 lookAheadCount++;
@@ -236,6 +249,7 @@ function parseMemberLinesRaw(lines) {
                 .replace(/"/g, '')
                 .replace(/\s+/g, ' ')
                 .replace(/,+/g, ',')
+                .replace(/,\s*,/g, ',') // clean up double commas
                 .replace(/^,|,$/g, '')
                 .trim();
 
@@ -597,7 +611,7 @@ function groupMembersIntoHouseholds(members) {
 
     for (const member of members) {
         // Normalize address for grouping (remove apartment numbers, etc.)
-        const addressKey = member.address
+    const addressKey = member.address
             .replace(/\bApt\s*\.?\s*\d+/gi, '')
             .replace(/\bSuite\s*\.?\s*\d+/gi, '')
             .replace(/\bUnit\s*\.?\s*\d+/gi, '')
@@ -641,4 +655,3 @@ function groupMembersIntoHouseholds(members) {
     
     return finalHouseholdList;
 }
-
